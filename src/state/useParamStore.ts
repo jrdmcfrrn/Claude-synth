@@ -1,65 +1,168 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+import type { ModuleInstance } from '../engine/ModuleInstance'
 
-export interface ParamValue {
-  value: number      // 0-1 normalized
-  displayValue: string // Human readable
+/**
+ * Parameter Store - Source of Record (not real-time truth)
+ *
+ * This store is for PERSISTENCE and SNAPSHOTS, not real-time audio control.
+ *
+ * Architecture:
+ * - During drag: Audio params updated directly via ModuleInstance.setParamImmediate()
+ * - On release: commitParam() saves the final value here for persistence
+ * - On mount: Store hydrates ModuleInstance params from saved state
+ *
+ * This decouples React rendering from audio updates, eliminating latency.
+ */
+
+export interface StoredParam {
+  value: number        // 0-1 normalized
+  displayValue: string // Human readable (for UI restore without recalculating)
 }
 
-interface ParamState {
-  // Map of moduleId -> paramName -> value
-  params: Record<string, Record<string, ParamValue>>
+export interface StoredModule {
+  id: string
+  type: string
+  slotIndex: number
+  params: Record<string, StoredParam>
+  isPowered: boolean
+}
 
-  // Set a parameter value
-  setParam: (moduleId: string, paramName: string, value: number, displayValue?: string) => void
+interface ParamStoreState {
+  // Stored module states (persisted)
+  modules: Record<string, StoredModule>
 
-  // Get a parameter value
-  getParam: (moduleId: string, paramName: string) => ParamValue | null
+  // Commit a parameter value (called on pointer release)
+  commitParam: (moduleId: string, paramName: string, value: number, displayValue: string) => void
 
-  // Initialize params for a module
-  initModule: (moduleId: string, params: Record<string, ParamValue>) => void
+  // Commit power state
+  commitPower: (moduleId: string, isPowered: boolean) => void
 
-  // Remove all params for a module
+  // Initialize store entry from a ModuleInstance
+  initFromModule: (module: ModuleInstance, slotIndex: number) => void
+
+  // Get stored state for a module (for hydration)
+  getStoredModule: (moduleId: string) => StoredModule | null
+
+  // Remove a module from storage
   removeModule: (moduleId: string) => void
+
+  // Get all stored modules (for session restore)
+  getAllStoredModules: () => StoredModule[]
+
+  // Clear all stored state
+  clearAll: () => void
 }
 
-export const useParamStore = create<ParamState>((set, get) => ({
-  params: {},
+export const useParamStore = create<ParamStoreState>()(
+  persist(
+    (set, get) => ({
+      modules: {},
 
-  setParam: (moduleId, paramName, value, displayValue) => {
-    set((state) => {
-      const moduleParams = state.params[moduleId] ?? {}
-      const display = displayValue ?? `${Math.round(value * 100)}%`
+      commitParam: (moduleId, paramName, value, displayValue) => {
+        set((state) => {
+          const existingModule = state.modules[moduleId]
+          if (!existingModule) return state
 
-      return {
-        params: {
-          ...state.params,
-          [moduleId]: {
-            ...moduleParams,
-            [paramName]: { value, displayValue: display },
-          },
-        },
-      }
-    })
-  },
-
-  getParam: (moduleId, paramName) => {
-    const state = get()
-    return state.params[moduleId]?.[paramName] ?? null
-  },
-
-  initModule: (moduleId, params) => {
-    set((state) => ({
-      params: {
-        ...state.params,
-        [moduleId]: params,
+          return {
+            modules: {
+              ...state.modules,
+              [moduleId]: {
+                ...existingModule,
+                params: {
+                  ...existingModule.params,
+                  [paramName]: { value, displayValue },
+                },
+              },
+            },
+          }
+        })
       },
-    }))
-  },
 
-  removeModule: (moduleId) => {
-    set((state) => {
-      const { [moduleId]: _, ...rest } = state.params
-      return { params: rest }
-    })
-  },
-}))
+      commitPower: (moduleId, isPowered) => {
+        set((state) => {
+          const existingModule = state.modules[moduleId]
+          if (!existingModule) return state
+
+          return {
+            modules: {
+              ...state.modules,
+              [moduleId]: {
+                ...existingModule,
+                isPowered,
+              },
+            },
+          }
+        })
+      },
+
+      initFromModule: (module, slotIndex) => {
+        const params: Record<string, StoredParam> = {}
+
+        for (const paramConfig of module.config.params) {
+          const value = module.getParam(paramConfig.name)
+          params[paramConfig.name] = {
+            value,
+            displayValue: paramConfig.format(value),
+          }
+        }
+
+        set((state) => ({
+          modules: {
+            ...state.modules,
+            [module.id]: {
+              id: module.id,
+              type: module.type,
+              slotIndex,
+              params,
+              isPowered: module.isPowered,
+            },
+          },
+        }))
+      },
+
+      getStoredModule: (moduleId) => {
+        return get().modules[moduleId] ?? null
+      },
+
+      removeModule: (moduleId) => {
+        set((state) => {
+          const { [moduleId]: _, ...rest } = state.modules
+          return { modules: rest }
+        })
+      },
+
+      getAllStoredModules: () => {
+        return Object.values(get().modules)
+      },
+
+      clearAll: () => {
+        set({ modules: {} })
+      },
+    }),
+    {
+      name: 'tideland-synth-params',
+      // Only persist the modules object
+      partialize: (state) => ({ modules: state.modules }),
+    }
+  )
+)
+
+/**
+ * Hydrate a ModuleInstance from stored state.
+ * Call this after creating a module to restore saved params.
+ */
+export function hydrateModuleFromStore(module: ModuleInstance): boolean {
+  const stored = useParamStore.getState().getStoredModule(module.id)
+  if (!stored) return false
+
+  // Restore each param
+  for (const [paramName, { value }] of Object.entries(stored.params)) {
+    module.setParamImmediate(paramName, value)
+  }
+
+  // Restore power state
+  module.setPower(stored.isPowered)
+
+  return true
+}

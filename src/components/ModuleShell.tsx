@@ -1,11 +1,19 @@
-import { useState } from 'react'
-import type { ModuleInstance } from '../state/useRackStore'
+import { useState, useCallback, memo } from 'react'
 import { Knob } from './controls/Knob'
 import { Button } from './controls/Button'
 import { PatchPoint } from './controls/PatchPoint'
 
+/**
+ * ModuleShell - Visual wrapper for a synth module
+ *
+ * This is a presentational component that renders the module UI.
+ * For MVP, it uses local state. In production, it will connect to
+ * the real ModuleInstance and useParamStore.
+ */
+
 interface ModuleShellProps {
-  module: ModuleInstance
+  moduleId: string
+  moduleType: string
 }
 
 // Module color palette
@@ -42,12 +50,12 @@ const MODULE_COLORS: Record<string, { bg: string; accent: string; text: string }
   },
 }
 
-// Demo params for each module type (will be replaced with real module definitions)
-const DEMO_PARAMS: Record<string, { name: string; label: string; default: number }[]> = {
+// Param definitions for each module type
+const MODULE_PARAMS: Record<string, { name: string; label: string; default: number; format?: (v: number) => string }[]> = {
   DroneOscillator: [
-    { name: 'pitch', label: 'Pitch', default: 0.3 },
-    { name: 'warmth', label: 'Warmth', default: 0.5 },
-    { name: 'drift', label: 'Drift', default: 0.2 },
+    { name: 'pitch', label: 'Pitch', default: 0.25, format: (v) => `${Math.round(40 + v * 160)}Hz` },
+    { name: 'warmth', label: 'Warmth', default: 0.4, format: (v) => `${Math.round(200 + v * 2800)}Hz` },
+    { name: 'drift', label: 'Drift', default: 0.3 },
   ],
   TidalFilter: [
     { name: 'depth', label: 'Depth', default: 0.4 },
@@ -70,22 +78,30 @@ const DEMO_PARAMS: Record<string, { name: string; label: string; default: number
   ],
 }
 
-export function ModuleShell({ module }: ModuleShellProps) {
-  const colors = MODULE_COLORS[module.type] || MODULE_COLORS.DroneOscillator
-  const params = DEMO_PARAMS[module.type] || []
+function ModuleShellComponent({ moduleId: _moduleId, moduleType }: ModuleShellProps) {
+  const colors = MODULE_COLORS[moduleType] || MODULE_COLORS.DroneOscillator
+  const paramDefs = MODULE_PARAMS[moduleType] || []
 
-  // Local state for param values (will be connected to store)
+  // Local state for param values (MVP - will connect to real modules later)
   const [values, setValues] = useState<Record<string, number>>(() => {
     const initial: Record<string, number> = {}
-    params.forEach(p => { initial[p.name] = p.default })
+    paramDefs.forEach(p => { initial[p.name] = p.default })
     return initial
   })
 
   const [isPowered, setIsPowered] = useState(true)
 
-  const handleParamChange = (name: string, value: number) => {
+  // During drag: immediate visual/audio update (MVP: just local state)
+  const handleDrag = useCallback((name: string, value: number) => {
     setValues(prev => ({ ...prev, [name]: value }))
-  }
+    // In production: would call moduleInstance.setParamImmediate(name, value)
+  }, [])
+
+  // On release: commit to store (MVP: no-op, same as drag)
+  const handleCommit = useCallback((name: string, value: number) => {
+    setValues(prev => ({ ...prev, [name]: value }))
+    // In production: would call useParamStore.commitParam(moduleId, name, value, displayValue)
+  }, [])
 
   return (
     <div
@@ -114,7 +130,7 @@ export function ModuleShell({ module }: ModuleShellProps) {
           className="text-[10px] uppercase tracking-wider font-medium"
           style={{ color: colors.text }}
         >
-          {module.type.replace(/([A-Z])/g, ' $1').trim()}
+          {moduleType.replace(/([A-Z])/g, ' $1').trim()}
         </span>
 
         {/* Power LED */}
@@ -140,14 +156,16 @@ export function ModuleShell({ module }: ModuleShellProps) {
 
         {/* Knobs */}
         <div className="flex items-center justify-center gap-4 flex-1">
-          {params.map((param) => (
+          {paramDefs.map((param) => (
             <Knob
               key={param.name}
               value={values[param.name]}
-              onChange={(v) => handleParamChange(param.name, v)}
+              onDrag={(v) => handleDrag(param.name, v)}
+              onCommit={(v) => handleCommit(param.name, v)}
               label={param.label}
               size="sm"
               color={colors.accent}
+              formatValue={param.format}
             />
           ))}
         </div>
@@ -181,3 +199,5 @@ export function ModuleShell({ module }: ModuleShellProps) {
     </div>
   )
 }
+
+export const ModuleShell = memo(ModuleShellComponent)

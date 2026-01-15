@@ -1,23 +1,33 @@
 import { useRef, useCallback, useEffect, useState } from 'react'
 
+/**
+ * useDrag - Hook for knob/fader drag with momentum physics
+ *
+ * Architecture:
+ * - During drag: Calls onDrag() for immediate audio/visual updates (bypasses React)
+ * - On release: Calls onCommit() with final value (for persistence to Zustand)
+ *
+ * This decouples 60fps interaction from React's render cycle.
+ */
+
 interface DragState {
   isDragging: boolean
   startY: number
   startValue: number
-  currentY: number
 }
 
 interface UseDragOptions {
-  value: number
-  onChange: (value: number) => void
-  sensitivity?: number     // How much mouse movement = value change
-  momentum?: boolean       // Enable momentum on release
-  momentumDecay?: number   // How quickly momentum decays (0-1, lower = faster decay)
+  initialValue: number
+  onDrag: (value: number) => void     // Called during drag (immediate audio update)
+  onCommit: (value: number) => void   // Called on release (persistence)
+  sensitivity?: number
+  momentum?: boolean
+  momentumDecay?: number
 }
 
 interface UseDragReturn {
   isDragging: boolean
-  velocity: number
+  currentValue: number  // Current value (including during drag)
   handlers: {
     onMouseDown: (e: React.MouseEvent) => void
     onTouchStart: (e: React.TouchEvent) => void
@@ -25,49 +35,53 @@ interface UseDragReturn {
 }
 
 export function useDrag({
-  value,
-  onChange,
+  initialValue,
+  onDrag,
+  onCommit,
   sensitivity = 0.005,
   momentum = true,
-  momentumDecay = 0.92,
+  momentumDecay = 0.88,
 }: UseDragOptions): UseDragReturn {
   const [isDragging, setIsDragging] = useState(false)
-  const [velocity, setVelocity] = useState(0)
 
+  // Refs for performance-critical values (no re-renders)
+  const valueRef = useRef(initialValue)
   const dragState = useRef<DragState>({
     isDragging: false,
     startY: 0,
     startValue: 0,
-    currentY: 0,
   })
-
   const velocityRef = useRef(0)
   const lastYRef = useRef(0)
   const animationRef = useRef<number | null>(null)
 
-  // Clamp value between 0 and 1
+  // Sync ref when initialValue changes (e.g., on mount)
+  useEffect(() => {
+    if (!dragState.current.isDragging) {
+      valueRef.current = initialValue
+    }
+  }, [initialValue])
+
   const clamp = (v: number): number => Math.max(0, Math.min(1, v))
 
-  // Handle momentum animation after drag ends
+  // Momentum animation after release
   const animateMomentum = useCallback(() => {
     if (Math.abs(velocityRef.current) < 0.0005) {
       velocityRef.current = 0
-      setVelocity(0)
+      // Final commit after momentum settles
+      onCommit(valueRef.current)
       return
     }
 
-    const newValue = clamp(value + velocityRef.current)
-    onChange(newValue)
+    valueRef.current = clamp(valueRef.current + velocityRef.current)
+    onDrag(valueRef.current)
 
     velocityRef.current *= momentumDecay
-    setVelocity(velocityRef.current)
-
     animationRef.current = requestAnimationFrame(animateMomentum)
-  }, [value, onChange, momentumDecay])
+  }, [onDrag, onCommit, momentumDecay])
 
   // Start drag
   const handleDragStart = useCallback((clientY: number) => {
-    // Cancel any ongoing momentum animation
     if (animationRef.current) {
       cancelAnimationFrame(animationRef.current)
       animationRef.current = null
@@ -76,17 +90,15 @@ export function useDrag({
     dragState.current = {
       isDragging: true,
       startY: clientY,
-      startValue: value,
-      currentY: clientY,
+      startValue: valueRef.current,
     }
 
     lastYRef.current = clientY
     velocityRef.current = 0
     setIsDragging(true)
-    setVelocity(0)
-  }, [value])
+  }, [])
 
-  // Update during drag
+  // During drag
   const handleDragMove = useCallback((clientY: number) => {
     if (!dragState.current.isDragging) return
 
@@ -95,11 +107,13 @@ export function useDrag({
 
     // Calculate velocity for momentum
     const instantVelocity = (lastYRef.current - clientY) * sensitivity
-    velocityRef.current = instantVelocity * 0.3 + velocityRef.current * 0.7 // Smooth velocity
+    velocityRef.current = instantVelocity * 0.3 + velocityRef.current * 0.7
     lastYRef.current = clientY
 
-    onChange(newValue)
-  }, [sensitivity, onChange])
+    // Update ref and call onDrag (no React state update)
+    valueRef.current = newValue
+    onDrag(newValue)
+  }, [sensitivity, onDrag])
 
   // End drag
   const handleDragEnd = useCallback(() => {
@@ -108,32 +122,23 @@ export function useDrag({
     dragState.current.isDragging = false
     setIsDragging(false)
 
-    // Start momentum animation if enabled and there's velocity
     if (momentum && Math.abs(velocityRef.current) > 0.001) {
-      setVelocity(velocityRef.current)
+      // Start momentum animation
       animationRef.current = requestAnimationFrame(animateMomentum)
+    } else {
+      // No momentum, commit immediately
+      onCommit(valueRef.current)
     }
-  }, [momentum, animateMomentum])
+  }, [momentum, animateMomentum, onCommit])
 
-  // Global mouse/touch handlers
+  // Global event listeners
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      handleDragMove(e.clientY)
-    }
-
-    const handleMouseUp = () => {
-      handleDragEnd()
-    }
-
+    const handleMouseMove = (e: MouseEvent) => handleDragMove(e.clientY)
+    const handleMouseUp = () => handleDragEnd()
     const handleTouchMove = (e: TouchEvent) => {
-      if (e.touches.length > 0) {
-        handleDragMove(e.touches[0].clientY)
-      }
+      if (e.touches.length > 0) handleDragMove(e.touches[0].clientY)
     }
-
-    const handleTouchEnd = () => {
-      handleDragEnd()
-    }
+    const handleTouchEnd = () => handleDragEnd()
 
     if (isDragging) {
       window.addEventListener('mousemove', handleMouseMove)
@@ -150,7 +155,7 @@ export function useDrag({
     }
   }, [isDragging, handleDragMove, handleDragEnd])
 
-  // Cleanup animation on unmount
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (animationRef.current) {
@@ -172,7 +177,7 @@ export function useDrag({
 
   return {
     isDragging,
-    velocity,
+    currentValue: valueRef.current,
     handlers: {
       onMouseDown,
       onTouchStart,

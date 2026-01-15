@@ -1,13 +1,22 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback, memo } from 'react'
 import { useDrag } from '../../interaction/useDrag'
 
+/**
+ * Knob - Rotary control with direct DOM manipulation during drag
+ *
+ * Performance architecture:
+ * - During drag: Updates rotation via direct DOM transform (no React re-render)
+ * - On release: Commits to state, triggers one re-render
+ * - Audio updates: onDrag callback for immediate Tone.js param changes
+ */
+
 interface KnobProps {
-  value: number           // 0-1 normalized
-  onChange: (value: number) => void
+  value: number           // 0-1 normalized (from store, represents committed value)
+  onDrag: (value: number) => void    // Called during drag (immediate audio update)
+  onCommit: (value: number) => void  // Called on release (persistence)
   label?: string
   size?: 'sm' | 'md' | 'lg'
-  color?: string          // Accent color for the indicator
-  showValue?: boolean
+  color?: string
   formatValue?: (value: number) => string
   sensitivity?: number
 }
@@ -18,89 +27,80 @@ const SIZES = {
   lg: { outer: 64, inner: 48, stroke: 4 },
 }
 
-export function Knob({
+const MIN_ANGLE = -135
+const MAX_ANGLE = 135
+
+function KnobComponent({
   value,
-  onChange,
+  onDrag,
+  onCommit,
   label,
   size = 'md',
   color = '#4ecdc4',
-  showValue = true,
   formatValue = (v) => `${Math.round(v * 100)}%`,
   sensitivity = 0.004,
 }: KnobProps) {
   const [isHovered, setIsHovered] = useState(false)
-  const [showParticles, setShowParticles] = useState(false)
-  const lastSignificantValue = useRef(value)
-  const particleTimeoutRef = useRef<number | null>(null)
+  const [committedValue, setCommittedValue] = useState(value)
+
+  // Refs for direct DOM manipulation
+  const knobBodyRef = useRef<SVGGElement>(null)
+  const valueArcRef = useRef<SVGPathElement>(null)
+  const valueDisplayRef = useRef<HTMLSpanElement>(null)
+
+  const dimensions = SIZES[size]
+
+  // Sync committed value when prop changes (e.g., restore from store)
+  useEffect(() => {
+    setCommittedValue(value)
+  }, [value])
+
+  // Direct DOM update during drag (no React re-render)
+  const updateKnobVisuals = useCallback((v: number) => {
+    const angle = MIN_ANGLE + v * (MAX_ANGLE - MIN_ANGLE)
+
+    // Update knob rotation
+    if (knobBodyRef.current) {
+      knobBodyRef.current.style.transform = `rotate(${angle}deg)`
+      knobBodyRef.current.style.transformOrigin = 'center center'
+    }
+
+    // Update value arc
+    if (valueArcRef.current) {
+      const arcPath = createArc(MIN_ANGLE, angle, dimensions.inner / 2 - 2, dimensions.outer)
+      valueArcRef.current.setAttribute('d', arcPath)
+      valueArcRef.current.style.display = v > 0.01 ? 'block' : 'none'
+    }
+
+    // Update value display
+    if (valueDisplayRef.current) {
+      valueDisplayRef.current.textContent = formatValue(v)
+    }
+  }, [dimensions, formatValue])
+
+  // Handle drag with direct DOM updates
+  const handleDrag = useCallback((v: number) => {
+    updateKnobVisuals(v)
+    onDrag(v)
+  }, [updateKnobVisuals, onDrag])
+
+  // Handle commit (updates React state for final render)
+  const handleCommit = useCallback((v: number) => {
+    setCommittedValue(v)
+    onCommit(v)
+  }, [onCommit])
 
   const { isDragging, handlers } = useDrag({
-    value,
-    onChange,
+    initialValue: committedValue,
+    onDrag: handleDrag,
+    onCommit: handleCommit,
     sensitivity,
     momentum: true,
     momentumDecay: 0.88,
   })
 
-  const dimensions = SIZES[size]
-
-  // Calculate rotation angle (270 degree sweep, from -135 to +135)
-  const minAngle = -135
-  const maxAngle = 135
-  const angle = minAngle + value * (maxAngle - minAngle)
-
-  // Detect significant value changes for particle effect
-  useEffect(() => {
-    const delta = Math.abs(value - lastSignificantValue.current)
-    if (delta > 0.15) {
-      lastSignificantValue.current = value
-      setShowParticles(true)
-
-      if (particleTimeoutRef.current) {
-        clearTimeout(particleTimeoutRef.current)
-      }
-      particleTimeoutRef.current = window.setTimeout(() => {
-        setShowParticles(false)
-      }, 300)
-    }
-  }, [value])
-
-  // Cleanup
-  useEffect(() => {
-    return () => {
-      if (particleTimeoutRef.current) {
-        clearTimeout(particleTimeoutRef.current)
-      }
-    }
-  }, [])
-
-  // Calculate arc path for value indicator
-  const createArc = (startAngle: number, endAngle: number, radius: number) => {
-    const start = polarToCartesian(dimensions.outer / 2, dimensions.outer / 2, radius, endAngle)
-    const end = polarToCartesian(dimensions.outer / 2, dimensions.outer / 2, radius, startAngle)
-    const largeArcFlag = endAngle - startAngle <= 180 ? 0 : 1
-
-    return [
-      'M', start.x, start.y,
-      'A', radius, radius, 0, largeArcFlag, 0, end.x, end.y
-    ].join(' ')
-  }
-
-  const polarToCartesian = (cx: number, cy: number, r: number, angleDeg: number) => {
-    const angleRad = (angleDeg - 90) * Math.PI / 180
-    return {
-      x: cx + r * Math.cos(angleRad),
-      y: cy + r * Math.sin(angleRad),
-    }
-  }
-
-  // Calculate indicator line position
-  const indicatorLength = dimensions.inner / 2 - 4
-  const indicatorEnd = polarToCartesian(
-    dimensions.outer / 2,
-    dimensions.outer / 2,
-    indicatorLength,
-    angle
-  )
+  // Calculate initial angle from committed value
+  const angle = MIN_ANGLE + committedValue * (MAX_ANGLE - MIN_ANGLE)
 
   // Glow intensity based on interaction state
   const glowIntensity = isDragging ? 1 : isHovered ? 0.5 : 0
@@ -129,109 +129,90 @@ export function Knob({
           width={dimensions.outer}
           height={dimensions.outer}
           viewBox={`0 0 ${dimensions.outer} ${dimensions.outer}`}
+          style={{ overflow: 'visible' }}
         >
           {/* Background track */}
           <path
-            d={createArc(minAngle, maxAngle, dimensions.inner / 2 - 2)}
+            d={createArc(MIN_ANGLE, MAX_ANGLE, dimensions.inner / 2 - 2, dimensions.outer)}
             fill="none"
             stroke="#2a2a3a"
             strokeWidth={dimensions.stroke}
             strokeLinecap="round"
           />
 
-          {/* Value arc */}
-          {value > 0.01 && (
-            <path
-              d={createArc(minAngle, angle, dimensions.inner / 2 - 2)}
-              fill="none"
-              stroke={color}
-              strokeWidth={dimensions.stroke}
-              strokeLinecap="round"
+          {/* Value arc - updated directly during drag */}
+          <path
+            ref={valueArcRef}
+            d={createArc(MIN_ANGLE, angle, dimensions.inner / 2 - 2, dimensions.outer)}
+            fill="none"
+            stroke={color}
+            strokeWidth={dimensions.stroke}
+            strokeLinecap="round"
+            style={{
+              opacity: 0.8 + glowIntensity * 0.2,
+              display: committedValue > 0.01 ? 'block' : 'none',
+            }}
+          />
+
+          {/* Rotatable knob group - updated directly during drag */}
+          <g
+            ref={knobBodyRef}
+            style={{
+              transform: `rotate(${angle}deg)`,
+              transformOrigin: 'center center',
+            }}
+          >
+            {/* Knob body (brass/metallic look) */}
+            <circle
+              cx={dimensions.outer / 2}
+              cy={dimensions.outer / 2}
+              r={dimensions.inner / 2 - 4}
+              fill={`url(#knobGradient-${size})`}
               style={{
-                opacity: 0.8 + glowIntensity * 0.2,
+                filter: isDragging ? 'brightness(1.1)' : 'none',
               }}
             />
-          )}
 
-          {/* Knob body (brass/metallic look) */}
-          <circle
-            cx={dimensions.outer / 2}
-            cy={dimensions.outer / 2}
-            r={dimensions.inner / 2 - 4}
-            fill="url(#knobGradient)"
-            style={{
-              filter: isDragging ? 'brightness(1.1)' : 'none',
-            }}
-          />
+            {/* Knob edge highlight */}
+            <circle
+              cx={dimensions.outer / 2}
+              cy={dimensions.outer / 2}
+              r={dimensions.inner / 2 - 4}
+              fill="none"
+              stroke="rgba(255,255,255,0.15)"
+              strokeWidth={1}
+            />
 
-          {/* Knob edge highlight */}
-          <circle
-            cx={dimensions.outer / 2}
-            cy={dimensions.outer / 2}
-            r={dimensions.inner / 2 - 4}
-            fill="none"
-            stroke="rgba(255,255,255,0.15)"
-            strokeWidth={1}
-          />
+            {/* Indicator line (always points up in local coords, rotates with group) */}
+            <line
+              x1={dimensions.outer / 2}
+              y1={dimensions.outer / 2}
+              x2={dimensions.outer / 2}
+              y2={dimensions.outer / 2 - (dimensions.inner / 2 - 8)}
+              stroke="#1a1a2a"
+              strokeWidth={2}
+              strokeLinecap="round"
+            />
 
-          {/* Indicator line */}
-          <line
-            x1={dimensions.outer / 2}
-            y1={dimensions.outer / 2}
-            x2={indicatorEnd.x}
-            y2={indicatorEnd.y}
-            stroke="#1a1a2a"
-            strokeWidth={2}
-            strokeLinecap="round"
-          />
-
-          {/* Indicator dot at end */}
-          <circle
-            cx={indicatorEnd.x}
-            cy={indicatorEnd.y}
-            r={2}
-            fill={color}
-            style={{
-              opacity: 0.6 + glowIntensity * 0.4,
-            }}
-          />
+            {/* Indicator dot */}
+            <circle
+              cx={dimensions.outer / 2}
+              cy={dimensions.outer / 2 - (dimensions.inner / 2 - 8)}
+              r={2}
+              fill={color}
+              style={{ opacity: 0.6 + glowIntensity * 0.4 }}
+            />
+          </g>
 
           {/* Gradient definitions */}
           <defs>
-            <radialGradient id="knobGradient" cx="30%" cy="30%">
+            <radialGradient id={`knobGradient-${size}`} cx="30%" cy="30%">
               <stop offset="0%" stopColor="#e8d5b7" />
               <stop offset="50%" stopColor="#d4a574" />
               <stop offset="100%" stopColor="#b8956a" />
             </radialGradient>
           </defs>
         </svg>
-
-        {/* Particle effect on significant change */}
-        {showParticles && (
-          <div
-            className="absolute inset-0 pointer-events-none"
-            style={{
-              animation: 'particleBurst 0.3s ease-out forwards',
-            }}
-          >
-            {[...Array(6)].map((_, i) => (
-              <div
-                key={i}
-                className="absolute rounded-full"
-                style={{
-                  width: 3,
-                  height: 3,
-                  backgroundColor: color,
-                  left: '50%',
-                  top: '50%',
-                  transform: `translate(-50%, -50%) rotate(${i * 60}deg) translateY(-${dimensions.outer / 2 + 5}px)`,
-                  opacity: 0,
-                  animation: `particleFly 0.3s ease-out ${i * 0.03}s forwards`,
-                }}
-              />
-            ))}
-          </div>
-        )}
       </div>
 
       {/* Label */}
@@ -244,37 +225,38 @@ export function Knob({
         </span>
       )}
 
-      {/* Value display */}
-      {showValue && (
-        <span
-          className="text-xs font-medium tabular-nums"
-          style={{
-            color: isDragging ? color : '#c0c0d0',
-            transition: 'color 0.15s',
-          }}
-        >
-          {formatValue(value)}
-        </span>
-      )}
-
-      {/* Keyframes for particle animation */}
-      <style>{`
-        @keyframes particleBurst {
-          0% { transform: scale(1); opacity: 1; }
-          100% { transform: scale(1.5); opacity: 0; }
-        }
-
-        @keyframes particleFly {
-          0% {
-            opacity: 1;
-            transform: translate(-50%, -50%) rotate(var(--angle)) translateY(-${dimensions.outer / 2 + 5}px);
-          }
-          100% {
-            opacity: 0;
-            transform: translate(-50%, -50%) rotate(var(--angle)) translateY(-${dimensions.outer / 2 + 20}px);
-          }
-        }
-      `}</style>
+      {/* Value display - updated directly during drag */}
+      <span
+        ref={valueDisplayRef}
+        className="text-xs font-medium tabular-nums"
+        style={{
+          color: isDragging ? color : '#c0c0d0',
+          transition: 'color 0.15s',
+        }}
+      >
+        {formatValue(committedValue)}
+      </span>
     </div>
   )
 }
+
+// Helper to create SVG arc path
+function createArc(startAngle: number, endAngle: number, radius: number, size: number): string {
+  const center = size / 2
+  const start = polarToCartesian(center, center, radius, endAngle)
+  const end = polarToCartesian(center, center, radius, startAngle)
+  const largeArcFlag = endAngle - startAngle <= 180 ? 0 : 1
+
+  return `M ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArcFlag} 0 ${end.x} ${end.y}`
+}
+
+function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number) {
+  const angleRad = (angleDeg - 90) * Math.PI / 180
+  return {
+    x: cx + r * Math.cos(angleRad),
+    y: cy + r * Math.sin(angleRad),
+  }
+}
+
+// Memoize to prevent re-renders from parent
+export const Knob = memo(KnobComponent)

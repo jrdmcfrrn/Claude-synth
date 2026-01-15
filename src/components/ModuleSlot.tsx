@@ -8,7 +8,7 @@ interface ModuleSlotProps {
 
 export function ModuleSlot({ slotIndex, module }: ModuleSlotProps) {
   if (module) {
-    return <ModuleShell module={module} />
+    return <ModuleShell moduleId={module.id} moduleType={module.type} />
   }
 
   // Empty slot
