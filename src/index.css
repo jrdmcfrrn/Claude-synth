@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+:root {
+  /* Tideland Synth Color Palette */
+  --color-sunset-coral: #ff7f6e;
+  --color-sunset-amber: #ffb347;
+  --color-sunset-pink: #ffb6c1;
+  --color-shadow-navy: #1a1f3c;
+  --color-shadow-plum: #3d2c4e;
+  --color-panel-cream: #f5e6d3;
+  --color-panel-beige: #e8d5b7;
+  --color-brass: #d4a574;
+  --color-led-white: #f0f0f0;
+  --color-accent-cyan: #4ecdc4;
+  --color-accent-green: #7ed87e;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--color-shadow-navy);
+}
+
+body {
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', 'Droid Sans Mono', monospace;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Disable text selection for interactive elements */
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
